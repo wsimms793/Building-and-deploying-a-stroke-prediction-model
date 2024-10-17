@@ -1,0 +1,224 @@
+---
+title: "Build and deploy a stroke prediction modal using R"
+author: "William Simms"
+date: "2024-10-13"
+output: html_document
+---
+
+**Data Description:**
+
+According to the World Health Organization (WHO) stroke is the 2nd leading cause of death globally, responsible for approximately 11% of total deaths.
+
+This data set is used to predict whether a patient is likely to get stroke based on the input parameters like gender, age, various diseases, and smoking status. Each row in the data provides relevant information about the patient.
+
+## Loading data and packages.
+
+```{r}
+##bringing the data into R
+data <- read.csv("healthcare-dataset-stroke-data.csv")
+getwd()
+setwd("~/Projects-programming/Build and deploy a stroke prediction modal")
+##loading packages into R
+library(ranger)
+library(tidymodels)
+library(tidyverse)
+library(workflows)
+library(tune)
+```
+
+## Describe and exploring the data.
+
+```{r}
+##general overview of data
+
+summary(data)
+table(data$gender)
+table(data$hypertension)
+table(data$heart_disease)
+table(data$ever_married)
+table(data$work_type)
+table(data$Residence_type)
+table(data$smoking_status)
+table(data$stroke)
+table(data$bmi)
+##manipulating the data
+##we notice how there is 1 value labelled other in gender we will remove this
+
+data <- data %>%
+  filter(gender != "Other")
+
+##for the purpose of our models we want stroke to be a factor not numeric.
+data$stroke <- as.factor(data$stroke)
+
+##there are very few 'NA' values for BMI we will simply remove this rows.
+data$bmi <- ifelse(data$bmi == "N/A", NA, data$bmi)
+data <- na.omit(data)
+data$bmi <- as.numeric(data$bmi)
+
+##insightful plots
+ggplot(data, aes(x = age)) + geom_histogram(binwidth = 5, color = "red")+  labs(title = "Distribution of Age", x = "Age", y = "Frequency")
+
+ggplot(data, aes(x = avg_glucose_level)) +  geom_density(fill = "lightblue") +  labs(title = "Density Plot of Average Glucose level",x= "Average Glucose Level")
+
+ggplot(data, aes(x=bmi)) + geom_histogram(binwidth = 5,color = "blue")+labs(title = ("Distribution of BMI"),x="bmi",y="Frequency")
+
+ggplot(data, aes(x = smoking_status)) +
+  geom_bar(fill = "green") +
+  labs(title = "Smoking Status", x = "Smoking Status", y = "Count")
+
+ggplot(data,aes(x=work_type)) + geom_bar(fill = "purple") + labs(title = "work_type",x="W_T",y="count")
+
+ggplot(data, aes(x = age, y = avg_glucose_level)) +
+  geom_point(color = "orange") +
+  labs(title = "Age vs. Average Glucose Level", x = "Age", y = "Average Glucose Level")
+
+ggplot(data, aes(x = age)) + geom_histogram(binwidth = 5) +facet_wrap(~ stroke, ncol = 2) +labs(title = "Distribution of Age by Stroke")
+
+ggplot(data, aes(x=bmi)) + geom_histogram(binwidth = 5)+facet_wrap(~stroke,ncol=2)+labs(title = "Distriubution of bmi by Stroke")
+
+ggplot(data, aes(x = age, y = bmi)) + geom_point(color= "purple") + labs(title = "Age vs. BMI", x = "Age", y = "BMI")
+
+##summary of data after manipulation
+summary(data)
+table(data$gender)
+table(data$bmi)
+```
+
+#Building prediction model
+
+```{r}
+##prepossessing 
+
+
+##we will first split the data into training(75%) and testing(25%)
+data_split <- initial_split(data, prop = 3/4)
+data_train <- training(data_split)
+data_test <- testing(data_split)
+data_cv <- vfold_cv(data_train)
+
+
+
+
+
+##defining a recipe & normalizing training data
+data_recipe <- recipe(stroke ~ gender + age + hypertension +heart_disease + Residence_type + avg_glucose_level +work_type +smoking_status +bmi+ever_married,data = data_train) %>%
+  step_normalize(all_numeric()) 
+  
+
+data_recipe
+
+##We will use a  Random forests model
+
+
+##specifying the model
+rf_model <- 
+  rand_forest() %>%
+  set_args(mtry = tune()) %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("classification") 
+
+
+##combining recipe and model into a workflow
+rf_workflow <- workflow() %>%
+  add_recipe(data_recipe) %>%
+  add_model(rf_model)
+
+
+#tuning parameters
+rf_grid <- expand.grid(mtry = c(3, 4, 5))
+# extract results
+rf_tune_results <- rf_workflow %>%
+  tune_grid(resamples = data_cv, #CV object
+            grid = rf_grid, # grid of values to try
+            metrics = metric_set(accuracy, roc_auc) # metrics we care about
+            )
+rf_tune_results %>%
+  collect_metrics()
+
+
+##finalizing the workflow
+param_final <- rf_tune_results %>%
+  select_best(metric = "accuracy")
+param_final
+
+
+rf_workflow <- rf_workflow %>%
+  finalize_workflow(param_final)
+
+
+
+
+```
+
+# Evaluating the model
+```{r}
+
+#Applying our model to the test/training data
+rf_fit <- rf_workflow %>%
+  last_fit(data_split)
+
+test_performance <- rf_fit %>% collect_metrics()
+test_performance
+##This indicates the model is preforming really well!!
+test_predictions <- rf_fit %>% collect_predictions()
+test_predictions 
+
+##generating confusion  matrix
+# generate a confusion matrix
+test_predictions %>% 
+  conf_mat(truth = stroke, estimate = .pred_class)
+##indicating our model only failed on 53 cases
+
+
+
+```
+
+#Deploying the prediction model
+
+```{r}
+#creating final model
+final_model <- fit(rf_workflow, data)
+final_model
+#testing to see if this works for new predictions
+New <- tribble(~gender,~age,~hypertension,~ever_married,~work_type,~Residence_type,~avg_glucose_level,~bmi,~smoking_status, ~heart_disease,
+               'Male',46,0,'Yes',"Self-employed",'Urban',100.00,30,'formerly smoked',1)
+
+predict(final_model, new_data = New)
+#predicts this individual won's have a stroke.
+
+
+#Trying different tribbles to gain insight on their predictions.
+bmi1<-tribble(~gender,~age,~hypertension,~ever_married,~work_type,~Residence_type,~avg_glucose_level,~bmi,~smoking_status,~heart_disease,
+               'Male',46,0,'Yes',"Self-employed",'Urban',100.00,25,'formerly smoked',1)
+bmi2<- tribble(~gender,~age,~hypertension,~ever_married,~work_type,~Residence_type,~avg_glucose_level,~bmi,~smoking_status,~heart_disease,
+               'Male',46,0,'Yes',"Self-employed",'Urban',100.00,50,'formerly smoked',1)
+
+predict(final_model, new_data = bmi1)
+predict(final_model, new_data =bmi2)
+
+
+gen1<-tribble(~gender,~age,~hypertension,~ever_married,~work_type,~Residence_type,~avg_glucose_level,~bmi,~smoking_status,~heart_disease,
+               'Male',60,0,'Yes',"Self-employed",'Urban',100.00,25,'formerly smoked',1)
+gen2<- tribble(~gender,~age,~hypertension,~ever_married,~work_type,~Residence_type,~avg_glucose_level,~bmi,~smoking_status,~heart_disease,
+            'Female',60,0,'Yes',"Self-employed",'Urban',100.00,25,'formerly smoked',1)
+predict(final_model, new_data = gen1)
+predict(final_model, new_data =gen2)
+
+
+age1<-tribble(~gender,~age,~hypertension,~ever_married,~work_type,~Residence_type,~avg_glucose_level,~bmi,~smoking_status,~heart_disease,
+               'Male',80,0,'Yes',"Self-employed",'Urban',100.00,25,'formerly smoked',1)
+age2 <- tribble(~gender,~age,~hypertension,~ever_married,~work_type,~Residence_type,~avg_glucose_level,~bmi,~smoking_status,~heart_disease,
+               'Male',60,0,'Yes',"Self-employed",'Urban',100.00,25,'formerly smoked',1)
+predict(final_model, new_data = age1)
+predict(final_model, new_data =age2)
+
+stroke1 <- tribble(~gender,~age,~hypertension,~ever_married,~work_type,~Residence_type,~avg_glucose_level,~bmi,~smoking_status,~heart_disease,
+               'Male',95,1,'Yes',"Self-employed",'Urban',270.00,60,'formerly smoked',1)
+predict(final_model, new_data =stroke1)
+```
+
+#Findings and Conclusions
+#Through this project I have become more confident with my ability to apply the tidyverse and tidymodels packages to data based ML problems. In particular with use of Random Forset models.
+#It seems as expected the average indivdal is about to have a stroke. It takes a cummlative effect of many different factos to cause a stroke. Glucose level however seems to play a big role.
+#The random forests model was well suited to this type of data set likely because of it's size,dimensionality & Imbalance of data.
+#Moving forward I could have further tunned the hyperparameters, tried different ML models & used more preprocsessing
